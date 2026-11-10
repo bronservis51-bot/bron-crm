@@ -1,0 +1,176 @@
+// Сессия и профиль пользователя. Разрешения в клиенте — только подсказка интерфейсу; сервер проверяет каждый запрос.
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { command, from, rows, toAppError } from './backend';
+import { setCurrencyMinorUnits } from './money';
+import { AppError } from './backend';
+import { queuedOps } from './outbox';
+import { clearUserData } from './offline';
+import { setRememberDevice, snapshot, supabase } from './supabase';
+
+export interface Assignment {
+  id: string;
+  role: 'franchise_manager' | 'franchisee' | 'franchisee_staff' | 'franchisee_manager' | 'technical_specialist';
+  role_name: string;
+  scope_type: 'company' | 'partner';
+  scope_id: string | null;
+  scope_name: string;
+  permissions: string[];
+}
+
+export interface Me {
+  user: { id: string; full_name: string; email: string; is_demo: boolean };
+  assignments: Assignment[];
+}
+
+interface SessionState {
+  status: 'loading' | 'signed-out' | 'signed-in';
+  me: Me | null;
+  can: (perm: string) => boolean;
+  /** Менеджер по франшизе: вся сеть. */
+  isManager: boolean;
+  /** Сотрудник франчайзи: смены и свой заработок. */
+  isStaff: boolean;
+  isTechnical: boolean;
+  isTeamManager: boolean;
+  changePassword: (password: string) => Promise<void>;
+  signIn: (email: string, password: string, remember: boolean) => Promise<void>;
+  signOut: () => Promise<void>;
+  reload: () => Promise<void>;
+}
+
+/** Снимок последних ответов для мгновенного старта экранов (хранится рядом с сессией, стирается при выходе). */
+export { snapshot };
+
+const Ctx = createContext<SessionState | null>(null);
+
+export function SessionProvider({ children }: { children: ReactNode }) {
+  const qc = useQueryClient();
+  const [status, setStatus] = useState<SessionState['status']>('loading');
+  const [me, setMe] = useState<Me | null>(null);
+
+  const applyMe = useCallback((data: Me) => {
+    setMe(data);
+    setStatus('signed-in');
+  }, []);
+
+  const loadMe = useCallback(async () => {
+    const data = await command<Me>('me');
+    if (!data?.user) {
+      snapshot.clear();
+      setMe(null);
+      setStatus('signed-out');
+      return;
+    }
+    snapshot.set('me', data);
+    applyMe(data);
+    rows<{ code: string; minor_unit: number }>(from('currency').select('code, minor_unit')).then((c) => {
+      snapshot.set('currency', c);
+      setCurrencyMinorUnits(c);
+    }, () => undefined);
+  }, [applyMe]);
+
+  useEffect(() => {
+    if (!supabase) {
+      setStatus('signed-out');
+      return;
+    }
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!active) return;
+      if (!data.session) {
+        snapshot.clear();
+        setStatus('signed-out');
+        return;
+      }
+      // Повторный вход: кабинет открывается сразу по сохранённому профилю, а профиль с сервера обновляет его в фоне
+      const cached = snapshot.get<Me>('me');
+      const fresh = cached?.user?.id === data.session.user.id;
+      if (fresh) {
+        const cur = snapshot.get<{ code: string; minor_unit: number }[]>('currency');
+        if (cur) setCurrencyMinorUnits(cur);
+        applyMe(cached);
+      }
+      loadMe().catch((e) => {
+        // Без сети остаёмся в кабинете с сохранённым профилем; выход — только если сессия недействительна
+        if (!fresh || toAppError(e).code === 'unauthenticated') setStatus('signed-out');
+      });
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && session && snapshot.get<Me>('me')?.user.id !== session.user.id) {
+        qc.clear(); snapshot.clear(); setMe(null); setStatus('loading');
+        setTimeout(() => { if (active) void loadMe().catch(() => setStatus('signed-out')); }, 0);
+      }
+      if (event === 'SIGNED_OUT') {
+        snapshot.clear();
+        setMe(null);
+        setStatus('signed-out');
+      }
+    });
+    return () => {
+      active = false;
+      sub.subscription.unsubscribe();
+    };
+  }, [loadMe, applyMe, qc]);
+
+  const signIn = useCallback(
+    async (email: string, password: string, remember: boolean) => {
+      if (!supabase) throw new Error('Supabase не настроен');
+      setRememberDevice(remember);
+      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      if (error) throw error;
+      qc.clear();
+      await loadMe();
+    },
+    [loadMe, qc],
+  );
+
+  const signOut = useCallback(async () => {
+    const uid = me?.user.id;
+    if (uid && (await queuedOps(uid)).length) throw new AppError('validation', 'Есть неотправленные записи. Сначала отправьте их или сохраните копию из списка очереди.', '', '');
+    if (uid) await clearUserData(uid); // черновики пользователя удаляются с устройства
+    qc.clear();
+    snapshot.clear();
+    await supabase?.auth.signOut({ scope: 'local' });
+    setRememberDevice(false);
+    setMe(null);
+    setStatus('signed-out');
+  }, [me, qc]);
+
+  const changePassword = useCallback(async (password: string) => {
+    if (!supabase) throw new Error('Supabase не настроен');
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) throw error;
+  }, []);
+
+  const value = useMemo<SessionState>(() => {
+    const perms = new Set(me?.assignments.flatMap((a) => a.permissions) ?? []);
+    return {
+      status,
+      me,
+      can: (perm) => perms.has(perm),
+      isTeamManager: !!me?.assignments.some(a => a.role === 'franchisee_manager') && !me.assignments.some(a=>a.role==='franchisee' || a.role==='franchise_manager'),
+      isTechnical: !!me?.assignments.some(a=>a.role==='technical_specialist') && !me.assignments.some(a=>a.role==='franchise_manager'),
+      isManager: me?.assignments.some((a) => a.role === 'franchise_manager') ?? false,
+      isStaff: (me?.assignments.length ?? 0) > 0 && (me?.assignments.every((a) => a.role === 'franchisee_staff') ?? false),
+      changePassword,
+      signIn,
+      signOut,
+      reload: loadMe,
+    };
+  }, [status, me, signIn, signOut, loadMe, changePassword]);
+
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+export function useSession() {
+  const v = useContext(Ctx);
+  if (!v) throw new Error('SessionProvider отсутствует');
+  return v;
+}
+
+export function useMe(): Me {
+  const { me } = useSession();
+  if (!me) throw new Error('Нет пользователя');
+  return me;
+}

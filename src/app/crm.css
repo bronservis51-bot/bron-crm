@@ -1,0 +1,21 @@
+.crm-app { min-height: 100dvh; min-width: 0; }
+.crm-topbar { gap: 16px; padding-inline: 24px; }
+.crm-title { font-weight: 650; white-space: nowrap; }
+.crm-mark { display: none; }
+.crm-profile { position: relative; flex-shrink: 0; }
+.crm-profile .menu { width: min(280px, calc(100vw - 32px)); }
+.crm-profile .menu a { display: flex; padding: 10px; color: inherit; text-decoration: none; }
+.crm-user-name { padding: 8px 10px; overflow-wrap: anywhere; }
+.crm-content { max-width: none; padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+.crm-alert { margin: 12px 24px 0; flex-wrap: wrap; }
+.login-panel .alert { flex-wrap: wrap; }
+.login-panel .alert .btn { flex-shrink: 0; }
+@media (max-width: 600px) {
+  .crm-topbar { padding-inline: 14px; gap: 10px; flex-wrap: wrap; }
+  .crm-full-logo { display: none; }
+  .crm-mark { display: flex; }
+  .crm-title { font-size: 15px; }
+  .crm-install { order: 5; width: 100%; }
+  .crm-install:has(:empty) { display: none; }
+  .crm-alert { margin-inline: 14px; }
+}
