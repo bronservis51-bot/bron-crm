@@ -31,10 +31,14 @@ window.fetch=async(input,init)=>{
  if(name==='lead_trash_list')return Response.json(rows.filter(r=>r.deleted_at));
  const row=rows.find(r=>r.id===args.p_id);
  if(name==='lead_set_deleted'&&row){row.deleted_at=args.p_deleted?new Date().toISOString():null;row.updated_at=new Date().toISOString();return Response.json(row);}
- if(name==='lead_move'&&row){row.pipeline_column=args.p_column;row.updated_at=new Date().toISOString();return Response.json(row);}
+ if(name==='lead_move'&&row){
+  row.pipeline_column=/^[01]{3}$/.test(args.p_column)?args.p_column:null;
+  row.status=/^[01]{3}$/.test(args.p_column)?'new':args.p_column;
+  row.updated_at=new Date().toISOString();return Response.json(row);
+ }
  if(name==='lead_save'){
   const input=args.p_lead;const old=rows.find(r=>r.id===input.id);
-  const saved={...first,...old,...input,id:old?.id??crypto.randomUUID(),pipeline_column:input.column,updated_at:new Date().toISOString(),deleted_at:null};
+  const saved={...first,...old,...input,id:old?.id??crypto.randomUUID(),pipeline_column:/^[01]{3}$/.test(input.column)?input.column:null,status:/^[01]{3}$/.test(input.column)?'new':input.column,updated_at:new Date().toISOString(),deleted_at:null};
   rows=[saved,...rows.filter(r=>r.id!==saved.id)];return Response.json(saved);
  }
  return Response.json({message:'validation',details:'Unexpected fake API request'},{status:400});

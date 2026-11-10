@@ -13,9 +13,11 @@ function memory() {
 
 let clientOptions: {auth:{storageKey:string;storage:{getItem:(k:string)=>string|null;setItem:(k:string,v:string)=>void;removeItem:(k:string)=>void}}};
 vi.mock('@supabase/supabase-js', () => ({ createClient: (_url:string,_key:string,options:typeof clientOptions) => {clientOptions=options;return {};} }));
-afterEach(() => {vi.unstubAllGlobals();vi.resetModules();});
+afterEach(() => {vi.unstubAllGlobals();vi.unstubAllEnvs();vi.resetModules();});
 describe('independent CRM sessions on the same GitHub Pages origin', () => {
   it('signs in and clears its own session without overwriting the main app session', async () => {
+    vi.stubEnv('VITE_SUPABASE_URL','https://qa.example.invalid');
+    vi.stubEnv('VITE_SUPABASE_PUBLISHABLE_KEY','sb_publishable_synthetic_only_for_test');
     const local=memory(),session=memory();
     vi.stubGlobal('localStorage',local);vi.stubGlobal('sessionStorage',session);
     vi.stubGlobal('location',{search:''});
